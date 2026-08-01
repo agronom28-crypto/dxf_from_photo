@@ -48,10 +48,14 @@ def run_pipeline(image,out_dir,scale_mm=1000.0,lang='rus+eng',strict=True):
     _save_json(out/'ocr_candidates.json',ocr); _save_json(out/'dimension_links_raw.json',raw_links); _save_json(out/'dimension_links.json',links)
     add_verified_dimensions(str(draft),str(out/'dimensions_overlay.dxf'),links,geo)
     counts={s:sum(1 for x in links['dimensions'] if x['status']==s) for s in ('resolved','review','unresolved')}
+    diagnostics=[]
+    if not ocr: diagnostics.append('OCR found no numeric candidates. Check Tesseract installation, image sharpness, handwriting, and text size.')
+    if ocr and not links.get('dimensions'): diagnostics.append('OCR candidates exist, but no dimension links were created.')
+    if links.get('detected',{}).get('segments',0)==0: diagnostics.append('No line segments detected for dimension linking.')
     manifest={'input':str(image),'outputs':{'draft_dxf':str(draft),'dimensions_overlay_dxf':str(out/'dimensions_overlay.dxf'),
         'geometry_json':str(geo_dir/'recognition_report.json'),'ocr_json':str(out/'ocr_candidates.json'),
         'links_json':str(out/'dimension_links.json'),'links_raw_json':str(out/'dimension_links_raw.json'),'links_preview':str(link_dir/'dimension_links.png')},
-        'counts':counts,'constraint_issues':links.get('constraint_solver',{}).get('issue_count',0),'safe_for_cnc':False,'warning':'Automatic OCR/dimension links must be verified before CNC.'}
+        'counts':counts,'diagnostics':diagnostics,'constraint_issues':links.get('constraint_solver',{}).get('issue_count',0),'safe_for_cnc':False,'warning':'Automatic OCR/dimension links must be verified before CNC.'}
     _save_json(out/'pipeline_manifest.json',manifest); return manifest
 
 def main():

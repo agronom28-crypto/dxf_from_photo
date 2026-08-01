@@ -92,39 +92,50 @@ def merge_close_boxes(boxes, img_shape, dilate_px=14):
     return merged
 
 
-def ocr_crop(gray, box, lang="rus+eng"):
+def ocr_crop(gray, box, lang="rus+eng", rotation_deg=0):
     x, y, w, h = box
-    pad = int(max(w, h) * 0.25)
+    pad = int(max(w, h) * 0.35)
     x0, y0 = max(0, x - pad), max(0, y - pad)
     x1, y1 = min(gray.shape[1], x + w + pad), min(gray.shape[0], y + h + pad)
     crop = gray[y0:y1, x0:x1]
-    if crop.size == 0:
-        return "", 0.0
-
+    if crop.size == 0: return "", 0.0
+    if rotation_deg:
+        h0,w0=crop.shape[:2]; center=(w0/2,h0/2)
+        M=cv2.getRotationMatrix2D(center,rotation_deg,1.0)
+        cs,ss=abs(M[0,0]),abs(M[0,1]); nw=int(h0*ss+w0*cs); nh=int(h0*cs+w0*ss)
+        M[0,2]+=nw/2-center[0]; M[1,2]+=nh/2-center[1]
+        crop=cv2.warpAffine(crop,M,(nw,nh),borderValue=255)
     crop = cv2.resize(crop, None, fx=UPSCALE_FACTOR, fy=UPSCALE_FACTOR, interpolation=cv2.INTER_CUBIC)
     crop = cv2.bilateralFilter(crop, 7, 50, 50)
-    _, crop_bin = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    variants=[]
+    _,otsu=cv2.threshold(crop,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU); variants.append(otsu)
+    variants.append(cv2.adaptiveThreshold(crop,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY,31,11))
+    best=("",0.0)
+    for image in variants:
+        for psm in (7,8,13):
+            config=f"--psm {psm} -c tessedit_char_whitelist=0123456789.,RrDdØø"
+            try: data=pytesseract.image_to_data(image,lang=lang,config=config,output_type=pytesseract.Output.DICT)
+            except Exception: continue
+            texts=[]; confs=[]
+            for t,c in zip(data['text'],data['conf']):
+                t=t.strip()
+                if t:
+                    texts.append(t)
+                    try:
+                        if float(c)>=0: confs.append(float(c))
+                    except ValueError: pass
+            raw=''.join(texts); conf=(sum(confs)/len(confs)/100.0) if confs else 0.0
+            if parse_number_candidate(raw) is not None and conf>best[1]: best=(raw,conf)
+    return best
 
-    config = "--psm 7 -c tessedit_char_whitelist=0123456789.,мм"
-    try:
-        data = pytesseract.image_to_data(
-            crop_bin, lang=lang, config=config, output_type=pytesseract.Output.DICT
-        )
-    except Exception:
-        return "", 0.0
-
-    texts, confs = [], []
-    for t, c in zip(data["text"], data["conf"]):
-        t = t.strip()
-        if t:
-            texts.append(t)
-            try:
-                confs.append(float(c))
-            except ValueError:
-                pass
-    raw = "".join(texts)
-    conf = (sum(confs) / len(confs) / 100.0) if confs else 0.0
-    return raw, conf
+def estimate_box_angle(gray,box):
+    x,y,w,h=box; crop=gray[y:y+h,x:x+w]
+    _,bw=cv2.threshold(crop,0,255,cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
+    pts=cv2.findNonZero(bw)
+    if pts is None or len(pts)<8:return 0.0
+    angle=float(cv2.minAreaRect(pts)[-1])
+    if angle>45: angle-=90
+    return angle
 
 
 def parse_number_candidate(raw_text):
@@ -158,15 +169,18 @@ def recognize_dimensions(image_path, debug_dir=None, lang="rus+eng"):
 
     results = []
     for box in boxes:
-        raw, conf = ocr_crop(gray_eq, box, lang=lang)
-        if not raw:
-            continue
-        value = parse_number_candidate(raw)
-        if value is None:
-            continue
+        estimated = estimate_box_angle(gray_eq, box)
+        angles = [0, -estimated, 90, -90, 180]
+        candidates = []
+        for angle in angles:
+            raw, conf = ocr_crop(gray_eq, box, lang=lang, rotation_deg=angle)
+            value = parse_number_candidate(raw)
+            if value is not None: candidates.append((conf, raw, value, angle))
+        if not candidates: continue
+        conf, raw, value, angle = max(candidates, key=lambda z: z[0])
         results.append({
             "bbox": box, "raw_text": raw, "parsed_value_mm": value,
-            "ocr_confidence": round(conf, 3),
+            "ocr_confidence": round(conf, 3), "angle_deg": round(float(-angle), 2),
         })
 
     results.sort(key=lambda r: -r["ocr_confidence"])
