@@ -141,3 +141,13 @@ python src/dimension_linker.py photo.jpg ocr_dimensions.json recognition_report.
 ```
 
 Результат сохраняется в `dimension_links.json` и `dimension_links.png`. Автоматически принимаются только связи с достаточной совокупной уверенностью OCR + линия + стрелки + геометрия; неоднозначные случаи получают статус `review` или `unresolved`, а не угадываются.
+
+## Полный автоматический цикл (v6)
+
+Одна локальная команда запускает геометрию, OCR, углонезависимую привязку размеров и формирует DXF-слой подтверждённых автоматикой размеров:
+
+```bash
+python src/auto_pipeline.py photo.jpg output/job --scale-mm=1830
+```
+
+Основные результаты: `draft.dxf`, `dimensions_overlay.dxf`, `pipeline_manifest.json`, `ocr_candidates.json`, `dimension_links.json` и диагностические изображения. Автоматические размеры записываются отдельно от режущей геометрии; связи `review` и `unresolved` в DXF не наносятся. Флаг `safe_for_cnc` намеренно остаётся `false`, пока нет операторского подтверждения.

@@ -403,12 +403,29 @@ def build_draft_dxf(image_path, dxf_path, target_width_mm, debug_dir=None,
 
     if debug_dir:
         os.makedirs(debug_dir, exist_ok=True)
+        geometry_report = {
+            "coordinate_system": "image_pixels",
+            "image_size": {"width": int(img.shape[1]), "height": int(img.shape[0])},
+            "scale": {"target_width_mm": float(target_width_mm), "px_to_mm": float(scale),
+                      "origin_px": [float(min_x), float(img.shape[0])]},
+            "outer_contour": outer_points.astype(float).tolist(),
+            "holes": [], "cutouts": [],
+            "counts": {"outer_points": len(outer_points), "holes": hole_count,
+                       "cutouts": cutout_count, "open_cutouts": open_cutout_count,
+                       "skipped_low_conf": skipped_low_conf},
+            "details": report_lines,
+        }
+        for obj in classified:
+            if obj["role"] == "HOLE_ROUND":
+                (cx, cy), r_px = cv2.minEnclosingCircle(obj["contour"])
+                geometry_report["holes"].append({"center": [float(cx), float(cy)],
+                    "radius": float(r_px), "confidence": float(obj["confidence"])})
+            elif obj["role"] in ("CUTOUT", "OPEN_CUTOUT"):
+                pts = contour_to_polyline(obj["contour"])
+                geometry_report["cutouts"].append({"points": pts.astype(float).tolist(),
+                    "open": obj["role"] == "OPEN_CUTOUT", "confidence": float(obj["confidence"])})
         with open(os.path.join(debug_dir, "recognition_report.json"), "w", encoding="utf-8") as f:
-            json.dump({
-                "outer_points": len(outer_points), "holes": hole_count,
-                "cutouts": cutout_count, "open_cutouts": open_cutout_count,
-                "skipped_low_conf": skipped_low_conf, "details": report_lines,
-            }, f, ensure_ascii=False, indent=2)
+            json.dump(geometry_report, f, ensure_ascii=False, indent=2)
         vis = img.copy()
         cv2.drawContours(vis, [main_outer["contour"]], -1, (0, 255, 0), 3)
         for obj in classified:

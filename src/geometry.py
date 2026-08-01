@@ -7,6 +7,8 @@ LAYER_COLORS = {
     "DIM": 3,
     "CENTER": 4,
     "TEXT": 2,
+    "DIM_AUTO": 5,
+    "TEXT_AUTO": 6,
 }
 
 
