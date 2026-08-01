@@ -2,7 +2,7 @@ import json,sys
 from pathlib import Path
 import cv2, numpy as np
 sys.path.insert(0,str(Path(__file__).parents[1]/'src'))
-from dimension_linker import link_dimensions, angle_diff, point_segment_distance
+from dimension_linker import link_dimensions, angle_diff, point_segment_distance, detect_segments
 
 def test_geometry_helpers():
     assert angle_diff(179,1)==2
@@ -23,3 +23,17 @@ def test_arbitrary_angle_link(tmp_path):
     assert report['dimensions'][0]['status'] in ('resolved','review')
     assert angle_diff(report['dimensions'][0]['line_angle_deg'],ocr[0]['angle_deg'])<8
     assert (tmp_path/'debug'/'dimension_links.json').exists()
+
+
+def test_hough_shape_opencv5(monkeypatch):
+    gray=np.full((100,100),255,np.uint8)
+    monkeypatch.setattr(cv2,'HoughLinesP',lambda *a,**k: np.array([[5,10,80,10],[5,20,80,20]],dtype=np.int32))
+    segments,_=detect_segments(gray,[])
+    assert len(segments)==2
+    assert all(len(s)==4 for s in segments)
+
+def test_hough_shape_opencv4(monkeypatch):
+    gray=np.full((100,100),255,np.uint8)
+    monkeypatch.setattr(cv2,'HoughLinesP',lambda *a,**k: np.array([[[5,10,80,10]],[[5,20,80,20]]],dtype=np.int32))
+    segments,_=detect_segments(gray,[])
+    assert len(segments)==2

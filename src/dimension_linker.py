@@ -45,7 +45,11 @@ def detect_segments(gray, text_boxes=()):
     lines=cv2.HoughLinesP(edges,1,np.pi/360,threshold=max(18,int(scale*.018)),
                           minLineLength=max(12,int(scale*.012)),maxLineGap=max(6,int(scale*.008)))
     if lines is None: return [],edges
-    raw=[list(map(float,l[0])) for l in lines]
+    # OpenCV 4 usually returns (N, 1, 4), while OpenCV 5 may return (N, 4).
+    # Normalizing via reshape keeps the linker compatible with both APIs.
+    arr=np.asarray(lines)
+    if arr.size == 0: return [],edges
+    raw=arr.reshape(-1,4).astype(float).tolist()
     return merge_collinear(raw),edges
 
 def merge_collinear(lines,angle_tol=4.0,offset_tol=8.0,gap_tol=25.0):
