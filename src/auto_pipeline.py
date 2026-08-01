@@ -5,6 +5,7 @@ from pathlib import Path
 from photo_to_draft_dxf import build_draft_dxf
 from ocr_dimensions import recognize_dimensions
 from dimension_linker import link_dimensions
+from constraint_solver import solve_constraints
 from geometry import DxfBuilder
 
 
@@ -42,14 +43,15 @@ def run_pipeline(image,out_dir,scale_mm=1000.0,lang='rus+eng',strict=True):
     build_draft_dxf(image,str(draft),scale_mm,debug_dir=str(geo_dir),strict=strict)
     ocr=recognize_dimensions(image,debug_dir=str(ocr_dir),lang=lang)
     geo=json.loads((geo_dir/'recognition_report.json').read_text(encoding='utf-8'))
-    links=link_dimensions(image,ocr,geo,debug_dir=str(link_dir))
-    _save_json(out/'ocr_candidates.json',ocr); _save_json(out/'dimension_links.json',links)
+    raw_links=link_dimensions(image,ocr,geo,debug_dir=str(link_dir))
+    links=solve_constraints(raw_links,geo)
+    _save_json(out/'ocr_candidates.json',ocr); _save_json(out/'dimension_links_raw.json',raw_links); _save_json(out/'dimension_links.json',links)
     add_verified_dimensions(str(draft),str(out/'dimensions_overlay.dxf'),links,geo)
     counts={s:sum(1 for x in links['dimensions'] if x['status']==s) for s in ('resolved','review','unresolved')}
     manifest={'input':str(image),'outputs':{'draft_dxf':str(draft),'dimensions_overlay_dxf':str(out/'dimensions_overlay.dxf'),
         'geometry_json':str(geo_dir/'recognition_report.json'),'ocr_json':str(out/'ocr_candidates.json'),
-        'links_json':str(out/'dimension_links.json'),'links_preview':str(link_dir/'dimension_links.png')},
-        'counts':counts,'safe_for_cnc':False,'warning':'Automatic OCR/dimension links must be verified before CNC.'}
+        'links_json':str(out/'dimension_links.json'),'links_raw_json':str(out/'dimension_links_raw.json'),'links_preview':str(link_dir/'dimension_links.png')},
+        'counts':counts,'constraint_issues':links.get('constraint_solver',{}).get('issue_count',0),'safe_for_cnc':False,'warning':'Automatic OCR/dimension links must be verified before CNC.'}
     _save_json(out/'pipeline_manifest.json',manifest); return manifest
 
 def main():
