@@ -31,9 +31,13 @@ class DxfBuilder:
         ]
 
     def polyline(self, points, layer="CUT", closed=True):
-        self.entities += ["0", "LWPOLYLINE", "8", layer, "90", str(len(points)), "70", "1" if closed else "0"]
+        # DXF R12 (AC1009) не поддерживает LWPOLYLINE (появился в R13+),
+        # поэтому используем классическую связку POLYLINE/VERTEX/SEQEND,
+        # которую гарантированно понимают ЧПУ/CAM программы.
+        self.entities += ["0", "POLYLINE", "8", layer, "66", "1", "70", "1" if closed else "0"]
         for x, y in points:
-            self.entities += ["10", f"{x:.3f}", "20", f"{y:.3f}"]
+            self.entities += ["0", "VERTEX", "8", layer, "10", f"{x:.3f}", "20", f"{y:.3f}", "30", "0"]
+        self.entities += ["0", "SEQEND", "8", layer]
 
     def text(self, x, y, s, h=14, rot=0, layer="TEXT"):
         self.entities += [
@@ -91,3 +95,49 @@ class DxfBuilder:
     def save(self, path):
         with open(path, "w", encoding="ascii") as f:
             f.write(self.to_dxf())
+
+
+def rectangle_with_chamfers(width, height, top_left_chamfer=0.0, top_right_chamfer=0.0,
+                             bottom_left_chamfer=0.0, bottom_right_chamfer=0.0):
+    """
+    Строит список точек контура прямоугольника width x height с опциональными
+    срезами (фасками) 45 градусов в любом из четырёх углов.
+
+    Углы отсчитываются в системе координат детали: (0,0) - нижний левый угол,
+    (width, height) - верхний правый. Значение chamfer - величина катета среза
+    (мм) вдоль каждой из двух сторон, сходящихся в угле (симметричный срез 45°).
+
+    Возвращает список (x, y) точек в порядке обхода против часовой стрелки,
+    начиная от нижней стороны, готовый для передачи в DxfBuilder.polyline().
+    """
+    pts = []
+
+    # bottom-left corner
+    if bottom_left_chamfer > 0:
+        pts.append((0.0, bottom_left_chamfer))
+        pts.append((bottom_left_chamfer, 0.0))
+    else:
+        pts.append((0.0, 0.0))
+
+    # bottom-right corner
+    if bottom_right_chamfer > 0:
+        pts.append((width - bottom_right_chamfer, 0.0))
+        pts.append((width, bottom_right_chamfer))
+    else:
+        pts.append((width, 0.0))
+
+    # top-right corner
+    if top_right_chamfer > 0:
+        pts.append((width, height - top_right_chamfer))
+        pts.append((width - top_right_chamfer, height))
+    else:
+        pts.append((width, height))
+
+    # top-left corner
+    if top_left_chamfer > 0:
+        pts.append((top_left_chamfer, height))
+        pts.append((0.0, height - top_left_chamfer))
+    else:
+        pts.append((0.0, height))
+
+    return pts
