@@ -36,7 +36,7 @@ import sys
 import json
 import argparse
 
-from geometry import DxfBuilder, rectangle_with_chamfers
+from geometry import DxfBuilder, rectangle_with_chamfers, stadium_outline
 
 
 def _load_spec(spec_path):
@@ -46,6 +46,7 @@ def _load_spec(spec_path):
     W = float(spec["width"])
     H = float(spec["height"])
     holes = spec.get("holes", [])
+    shape = spec.get("shape", "rectangle")
     ch = spec.get("chamfers", {}) or {}
     chamfers = {
         "top_left": float(ch.get("top_left", 0.0)),
@@ -53,21 +54,28 @@ def _load_spec(spec_path):
         "bottom_left": float(ch.get("bottom_left", 0.0)),
         "bottom_right": float(ch.get("bottom_right", 0.0)),
     }
-    return W, H, holes, chamfers
+    radius = float(spec.get("radius", 0.0))
+    return W, H, holes, chamfers, shape, radius
 
 
-def build_cnc_dxf(spec_path, dxf_path):
-    """Чистый файл для ЧПУ: только геометрия реза, без аннотаций."""
-    W, H, holes, chamfers = _load_spec(spec_path)
-
-    b = DxfBuilder()
-    outline = rectangle_with_chamfers(
+def _build_outline(W, H, chamfers, shape, radius):
+    if shape == "stadium":
+        return stadium_outline(W, H, radius)
+    return rectangle_with_chamfers(
         W, H,
         top_left_chamfer=chamfers["top_left"],
         top_right_chamfer=chamfers["top_right"],
         bottom_left_chamfer=chamfers["bottom_left"],
         bottom_right_chamfer=chamfers["bottom_right"],
     )
+
+
+def build_cnc_dxf(spec_path, dxf_path):
+    """Чистый файл для ЧПУ: только геометрия реза, без аннотаций."""
+    W, H, holes, chamfers, shape, radius = _load_spec(spec_path)
+
+    b = DxfBuilder()
+    outline = _build_outline(W, H, chamfers, shape, radius)
     b.polyline(outline, layer="CUT", closed=True)
 
     for hole in holes:
@@ -80,16 +88,10 @@ def build_cnc_dxf(spec_path, dxf_path):
 
 def build_dimensioned_dxf(spec_path, dxf_path):
     """Полный чертёж с профессионально нанесёнными размерами."""
-    W, H, holes, chamfers = _load_spec(spec_path)
+    W, H, holes, chamfers, shape, radius = _load_spec(spec_path)
 
     b = DxfBuilder()
-    outline = rectangle_with_chamfers(
-        W, H,
-        top_left_chamfer=chamfers["top_left"],
-        top_right_chamfer=chamfers["top_right"],
-        bottom_left_chamfer=chamfers["bottom_left"],
-        bottom_right_chamfer=chamfers["bottom_right"],
-    )
+    outline = _build_outline(W, H, chamfers, shape, radius)
     b.polyline(outline, layer="CUT", closed=True)
 
     for hole in holes:
@@ -131,20 +133,30 @@ def build_dimensioned_dxf(spec_path, dxf_path):
                 f"{len(group)} HOLES DIA {d:.0f}",
             )
 
-    # подписи фасок (для каждого ненулевого среза)
-    chamfer_labels = {
-        "top_left": (0.0, H),
-        "top_right": (W, H),
-        "bottom_left": (0.0, 0.0),
-        "bottom_right": (W, 0.0),
-    }
-    for name, val in chamfers.items():
-        if val > 0:
-            cx, cy = chamfer_labels[name]
-            offx = 60 if "left" in name else -60
-            offy = -60 if "bottom" in name else 60
-            b.leader(cx, cy, cx + offx, cy + offy, cx + offx * 1.8, cy + offy,
-                      f"CHAMFER {val:.0f}x45")
+    if shape == "stadium":
+        straight = W - 2 * radius
+        cy = H / 2.0
+        # длина прямых участков сверху и снизу
+        b.hdim(radius, radius + straight, H + 40, H, f"{straight:.0f}")
+        b.hdim(radius, radius + straight, -40, 0, f"{straight:.0f}")
+        # радиус левого и правого торца (подпись под углом 225 и -45 град.)
+        b.rdim(radius, cy, radius, 225, f"R{radius:.0f}")
+        b.rdim(W - radius, cy, radius, -45, f"R{radius:.0f}")
+    else:
+        # подписи фасок (для каждого ненулевого среза)
+        chamfer_labels = {
+            "top_left": (0.0, H),
+            "top_right": (W, H),
+            "bottom_left": (0.0, 0.0),
+            "bottom_right": (W, 0.0),
+        }
+        for name, val in chamfers.items():
+            if val > 0:
+                cx, cy = chamfer_labels[name]
+                offx = 60 if "left" in name else -60
+                offy = -60 if "bottom" in name else 60
+                b.leader(cx, cy, cx + offx, cy + offy, cx + offx * 1.8, cy + offy,
+                          f"CHAMFER {val:.0f}x45")
 
     b.text(0, H + 115, f"PART: RECTANGLE {W:.0f} x {H:.0f} mm", 20, 0, "TEXT")
     b.text(0, H + 85, "ALL DIMENSIONS IN mm. VERIFY BEFORE CNC CUTTING.", 14, 0, "TEXT")
