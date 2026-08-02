@@ -1,0 +1,7 @@
+{
+  "image": "operator_sketch.jpg",
+  "dimensions": [
+    {"id": "dim_width", "target": "outer.width", "bbox": [120, 40, 180, 70], "candidates": [{"text": "1830", "value_mm": 1830, "confidence": 0.97}]},
+    {"id": "dim_radius", "target": "corner_1.radius", "bbox": [510, 180, 90, 60], "candidates": [{"text": "35", "value_mm": 35, "confidence": 0.61}, {"text": "38", "value_mm": 38, "confidence": 0.56}]}
+  ]
+}
