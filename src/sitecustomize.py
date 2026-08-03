@@ -5,15 +5,22 @@ import os
 import re
 
 _MTEXT_CODES = re.compile(r"\\[A-Za-z](?:[^;]*;)?|[{}]")
-_TRANSLATION = str.maketrans({
+_CHAR_TRANSLATION = str.maketrans({
     "⌀": "DIA ", "Ø": "DIA ", "ø": "DIA ",
-    "ОТВ.": "HOLE", "отв.": "HOLE", "мм": "mm",
 })
+_WORD_REPLACEMENTS = (
+    ("ОТВ.", "HOLE"),
+    ("отв.", "HOLE"),
+    ("мм", "mm"),
+)
 
 
 def _plain_text(value: object) -> str:
     text = str(value).replace("\\P", " ").replace("\n", " ")
-    text = _MTEXT_CODES.sub("", text).translate(_TRANSLATION)
+    text = _MTEXT_CODES.sub("", text)
+    for source, target in _WORD_REPLACEMENTS:
+        text = text.replace(source, target)
+    text = text.translate(_CHAR_TRANSLATION)
     return " ".join(text.split()).encode("ascii", "replace").decode("ascii")
 
 
