@@ -154,6 +154,32 @@ def _dim_vertical(model, p1, p2, base, text, style):
     model.add_linear_dim(base=(base - x1, 0), p1=p1, p2=p2, angle=90, text=text, dimstyle=style, dxfattribs={"layer": "DIM"}).render()
 
 
+def _add_info_labels(model, width, height, specs, diameter, offset):
+    text_height = max(3, min(width, height) * 0.018)
+    row_spacing = text_height * 1.8
+    edge_gap = max(offset, text_height * 3)
+    column_width = max(width * 0.28, text_height * 24)
+    rows = max(1, int(max(height, row_spacing) // row_spacing))
+    ordered = sorted(enumerate(specs, 1), key=lambda item: item[1]["y"], reverse=True)
+    for position, (index, point) in enumerate(ordered):
+        column, row = divmod(position, rows)
+        label_x = width + edge_gap + column * column_width
+        label_y = height - text_height - row * row_spacing
+        elbow_x = width + edge_gap * 0.45
+        model.add_lwpolyline(
+            [
+                (point["x"] + diameter / 2, point["y"]),
+                (elbow_x, label_y),
+                (label_x - text_height, label_y),
+            ],
+            dxfattribs={"layer": "TEXT"},
+        )
+        model.add_text(
+            f"H{index}: X={point['x']:g} Y={point['y']:g} DIA{diameter:g}",
+            dxfattribs={"layer": "TEXT", "height": text_height, "insert": (label_x, label_y)},
+        )
+
+
 def _write(path, width, height, specs, diameter, outline, info):
     doc = ezdxf.new("R2010")
     doc.header["$INSUNITS"] = 4
@@ -167,8 +193,7 @@ def _write(path, width, height, specs, diameter, outline, info):
         offset = max(25, min(width, height) * 0.12)
         _dim_horizontal(model, (0, 0), (width, 0), -offset, f"{width:g}", style)
         _dim_vertical(model, (0, 0), (0, height), -offset, f"{height:g}", style)
-        for index, point in enumerate(specs, 1):
-            model.add_text(f"H{index}: X={point['x']:g} Y={point['y']:g} DIA{diameter:g}", dxfattribs={"layer": "TEXT", "height": max(3, min(width, height) * 0.018), "insert": (point["x"] + diameter, point["y"] + diameter)})
+        _add_info_labels(model, width, height, specs, diameter, offset)
     temporary = path.with_suffix(".tmp.dxf")
     doc.saveas(temporary)
     temporary.replace(path)
