@@ -5,111 +5,88 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-request = Path(sys.argv[1])
-response = Path(sys.argv[2])
+request, response = map(Path, sys.argv[1:3])
 data = json.loads(request.read_text(encoding="utf-8"))
-
 root = tk.Tk()
-root.title("Проверка геометрии детали")
+root.title("Размеры и привязка отверстий")
 root.attributes("-topmost", True)
-
-width_var = tk.StringVar(value=f"{float(data.get('width', 0)):g}")
-height_var = tk.StringVar(value=f"{float(data.get('height', 0)):g}")
-diameter_var = tk.StringVar(value=f"{float(data.get('diameter', 0)):g}")
-count_var = tk.StringVar(value=str(int(data.get("count", len(data.get("holes", []))))))
-original = list(data.get("holes", []))
-rows = []
-
-header = ttk.Frame(root, padding=10)
-header.pack(fill="x")
-for column, (label, variable) in enumerate((("Ширина, мм", width_var), ("Высота, мм", height_var), ("Диаметр, мм", diameter_var), ("Отверстий", count_var))):
-    ttk.Label(header, text=label).grid(row=0, column=column, padx=5, sticky="w")
-    ttk.Entry(header, textvariable=variable, width=12).grid(row=1, column=column, padx=5)
-
-body = ttk.Frame(root, padding=(10, 0, 10, 10))
-body.pack(fill="both", expand=True)
-canvas = tk.Canvas(body, width=560, height=360)
-scrollbar = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
-table = ttk.Frame(canvas)
-table.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
-canvas.create_window((0, 0), window=table, anchor="nw")
-canvas.configure(yscrollcommand=scrollbar.set)
-canvas.pack(side="left", fill="both", expand=True)
-scrollbar.pack(side="right", fill="y")
-
+width = tk.StringVar(value=f"{float(data.get('width', 0)):g}")
+height = tk.StringVar(value=f"{float(data.get('height', 0)):g}")
+diameter = tk.StringVar(value=f"{float(data.get('diameter', 10) or 10):g}")
+mode_values = ("Без открытых вырезов", "С открытыми вырезами")
+mode = tk.StringVar(value=data.get("cutout_mode", mode_values[0]))
+if mode.get() not in mode_values:
+    mode.set(mode_values[0])
+controls = []
 
 def number(value):
     return float(str(value).replace(",", "."))
 
+def edge_values(item, w, h):
+    x, y = float(item.get("x", w / 2)), float(item.get("y", h / 2))
+    hs = item.get("h_side") or ("слева" if x <= w / 2 else "справа")
+    vs = item.get("v_side") or ("снизу" if y <= h / 2 else "сверху")
+    dx = float(item.get("h_distance", x if hs == "слева" else w - x))
+    dy = float(item.get("v_distance", y if vs == "снизу" else h - y))
+    return hs, dx, vs, dy
 
-def rebuild():
-    try:
-        count = max(0, int(count_var.get()))
-        width = number(width_var.get())
-        height = number(height_var.get())
-    except ValueError:
-        messagebox.showerror("Ошибка", "Проверьте ширину, высоту и количество отверстий")
-        return
-    saved = []
-    for x_var, y_var in rows:
-        try:
-            saved.append({"x": number(x_var.get()), "y": number(y_var.get())})
-        except ValueError:
-            saved.append({})
-    for widget in table.winfo_children():
-        widget.destroy()
-    rows.clear()
-    ttk.Label(table, text="№", width=6).grid(row=0, column=0, padx=5, pady=4)
-    ttk.Label(table, text="X, мм", width=18).grid(row=0, column=1, padx=5, pady=4)
-    ttk.Label(table, text="Y, мм", width=18).grid(row=0, column=2, padx=5, pady=4)
-    for index in range(count):
-        source = saved[index] if index < len(saved) else original[index] if index < len(original) else {"x": width * (index + 1) / (count + 1), "y": height / 2}
-        x_var = tk.StringVar(value=f"{float(source.get('x', width / 2)):g}")
-        y_var = tk.StringVar(value=f"{float(source.get('y', height / 2)):g}")
-        rows.append((x_var, y_var))
-        ttk.Label(table, text=str(index + 1)).grid(row=index + 1, column=0, padx=5, pady=3)
-        ttk.Entry(table, textvariable=x_var, width=18).grid(row=index + 1, column=1, padx=5, pady=3)
-        ttk.Entry(table, textvariable=y_var, width=18).grid(row=index + 1, column=2, padx=5, pady=3)
+head = ttk.Frame(root, padding=12)
+head.pack(fill="x")
+for col, (title, variable) in enumerate((("Ширина, мм", width), ("Высота, мм", height), ("Диаметр, мм", diameter))):
+    ttk.Label(head, text=title).grid(row=0, column=col, padx=5, sticky="w")
+    ttk.Entry(head, textvariable=variable, width=13).grid(row=1, column=col, padx=5)
+ttk.Label(head, text="Тип контура").grid(row=0, column=3, padx=5, sticky="w")
+ttk.Combobox(head, textvariable=mode, values=mode_values, state="readonly", width=24).grid(row=1, column=3, padx=5)
 
+body = ttk.Frame(root, padding=12)
+body.pack(fill="both", expand=True)
+for col, title in enumerate(("№", "По горизонтали от", "Расстояние, мм", "По вертикали от", "Расстояние, мм")):
+    ttk.Label(body, text=title).grid(row=0, column=col, padx=5, pady=4)
+w0, h0 = number(width.get()), number(height.get())
+for index, item in enumerate(data.get("holes", []), 1):
+    hs0, dx0, vs0, dy0 = edge_values(item, w0, h0)
+    hs, dx, vs, dy = tk.StringVar(value=hs0), tk.StringVar(value=f"{dx0:g}"), tk.StringVar(value=vs0), tk.StringVar(value=f"{dy0:g}")
+    controls.append((hs, dx, vs, dy))
+    ttk.Label(body, text=str(index)).grid(row=index, column=0, padx=5, pady=3)
+    ttk.Combobox(body, textvariable=hs, values=("слева", "справа"), state="readonly", width=12).grid(row=index, column=1, padx=5)
+    ttk.Entry(body, textvariable=dx, width=15).grid(row=index, column=2, padx=5)
+    ttk.Combobox(body, textvariable=vs, values=("снизу", "сверху"), state="readonly", width=12).grid(row=index, column=3, padx=5)
+    ttk.Entry(body, textvariable=dy, width=15).grid(row=index, column=4, padx=5)
+
+def close(code):
+    root.withdraw(); root.update_idletasks(); root.after(20, lambda: os._exit(code))
 
 def finish():
     try:
-        width = number(width_var.get())
-        height = number(height_var.get())
-        diameter = number(diameter_var.get())
-        count = int(count_var.get())
-        if width <= 0 or height <= 0 or diameter <= 0 or count < 0:
+        w, h, dia = number(width.get()), number(height.get()), number(diameter.get())
+        if w <= 0 or h <= 0 or dia <= 0:
             raise ValueError
-        if len(rows) != count:
-            rebuild()
-            if len(rows) != count:
-                return
-        hole_values = [{"x": number(x.get()), "y": number(y.get())} for x, y in rows]
+        result = []
+        for hs, dx_text, vs, dy_text in controls:
+            dx, dy = number(dx_text.get()), number(dy_text.get())
+            x = dx if hs.get() == "слева" else w - dx
+            y = dy if vs.get() == "снизу" else h - dy
+            if dx < 0 or dy < 0 or not (0 <= x <= w and 0 <= y <= h):
+                raise ValueError
+            result.append({"x": x, "y": y, "h_side": hs.get(), "h_distance": dx, "v_side": vs.get(), "v_distance": dy})
     except ValueError:
-        messagebox.showerror("Ошибка", "Все размеры должны быть положительными числами")
+        messagebox.showerror("Ошибка", "Проверьте размеры и расстояния отверстий от краёв", parent=root)
         return
-    payload = {"width": width, "height": height, "count": count, "diameter": diameter, "holes": hole_values}
+    payload = dict(data)
+    payload.update({"width": w, "height": h, "diameter": dia, "count": len(result), "holes": result, "cutout_mode": mode.get()})
     temporary = response.with_suffix(response.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(response)
-    root.withdraw()
-    root.update_idletasks()
-    root.after(20, lambda: os._exit(0))
+    close(0)
 
+def action(parent, text, command):
+    label = tk.Label(parent, text=text, bg="#176b3a", fg="#ffffff", activebackground="#0f4d29", activeforeground="#ffffff", font=("Arial", 13, "bold"), padx=20, pady=9, relief="raised", bd=2, cursor="hand2")
+    label.bind("<Button-1>", lambda event: command())
+    return label
 
-def cancel():
-    root.withdraw()
-    root.update_idletasks()
-    root.after(20, lambda: os._exit(2))
-
-buttons = ttk.Frame(root, padding=10)
+buttons = ttk.Frame(root, padding=12)
 buttons.pack(fill="x")
-ttk.Button(buttons, text="Обновить количество", command=rebuild).pack(side="left")
-tk.Button(buttons, text="Подтвердить", command=finish, bg="#2e7d32", fg="white", font=("Arial", 12, "bold")).pack(side="right", padx=5)
-ttk.Button(buttons, text="Отмена", command=cancel).pack(side="right", padx=5)
-
-rebuild()
-root.protocol("WM_DELETE_WINDOW", cancel)
-root.lift()
-root.focus_force()
-root.mainloop()
+ttk.Button(buttons, text="Отмена", command=lambda: close(2)).pack(side="right", padx=6)
+action(buttons, "Продолжить", finish).pack(side="right", padx=6)
+root.protocol("WM_DELETE_WINDOW", lambda: close(2))
+root.lift(); root.focus_force(); root.mainloop()
