@@ -12,7 +12,7 @@ from pathlib import Path
 import ezdxf
 
 import hole_diameter_clarification as holes
-from contour_geometry import extract_outline
+from contour_geometry import build_contour_from_measurements, extract_outline
 
 ROOT = Path(__file__).resolve().parent.parent
 INBOX = ROOT / "новые фотографии"
@@ -26,9 +26,9 @@ POLL = 1.0
 
 def _atomic_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
 
 
 def _state():
@@ -64,11 +64,7 @@ def _select_roi(source):
 
 
 def _confirm_holes(source, roi):
-    return _invoke_helper(
-        "hole_confirmation_dialog.py",
-        [source, json.dumps(list(roi))],
-        TMP / "hole_response.json",
-    )
+    return _invoke_helper("hole_confirmation_dialog.py", [source, json.dumps(list(roi))], TMP / "hole_response.json")
 
 
 def _manual(defaults):
@@ -103,17 +99,13 @@ def _hole_defaults(circles, bbox, width, height):
         nx = (float(circle["x"]) - bx) / max(1.0, bw)
         ny = 1.0 - (float(circle["y"]) - by) / max(1.0, bh)
         if -0.03 <= nx <= 1.03 and -0.03 <= ny <= 1.03:
-            result.append({
-                "x": round(min(1, max(0, nx)) * width, 3),
-                "y": round(min(1, max(0, ny)) * height, 3),
-            })
+            result.append({"x": round(min(1, max(0, nx)) * width, 3), "y": round(min(1, max(0, ny)) * height, 3)})
     return result
 
 
 def _defaults(source, confirmed, outline):
     width, height = _parse_dims(source)
-    width = width or 1040.0
-    height = height or 710.0
+    width, height = width or 1040.0, height or 710.0
     diameter = float(confirmed.get("diameter") or holes.read_diameter(source) or 10.0)
     specs = _hole_defaults(confirmed.get("circles", []), outline["bbox"], width, height)
     count = int(confirmed.get("count", len(specs)))
@@ -121,7 +113,20 @@ def _defaults(source, confirmed, outline):
     while len(specs) < count:
         index = len(specs)
         specs.append({"x": round(width * (index + 1) / (count + 1), 3), "y": round(height / 2, 3)})
-    return {"width": width, "height": height, "count": count, "diameter": diameter, "holes": specs}
+    return {"width": width, "height": height, "count": count, "diameter": diameter, "holes": specs, "cutout_mode": "Без открытых вырезов"}
+
+
+def _resolved_outline(answer, detected):
+    width, height = float(answer["width"]), float(answer["height"])
+    measurements = dict(answer)
+    measurements["contour_points"] = detected.get("points", [])
+    absolute = build_contour_from_measurements(measurements)
+    normalized = [[float(x) / width, float(y) / height] for x, y in absolute]
+    result = dict(detected)
+    result["points"] = normalized
+    result["mode"] = answer.get("cutout_mode", "Без открытых вырезов")
+    result["rectified"] = result["mode"] == "Без открытых вырезов" and len(normalized) == 4
+    return result
 
 
 def _geometry(model, width, height, specs, diameter, outline):
@@ -152,33 +157,18 @@ def _dim_vertical(model, p1, p2, base, text, style):
 def _write(path, width, height, specs, diameter, outline, info):
     doc = ezdxf.new("R2010")
     doc.header["$INSUNITS"] = 4
-    doc.layers.new("CUT", dxfattribs={"color": 7})
-    doc.layers.new("HOLES", dxfattribs={"color": 1})
-    doc.layers.new("DIM", dxfattribs={"color": 3})
-    doc.layers.new("TEXT", dxfattribs={"color": 2})
+    for name, color in (("CUT", 7), ("HOLES", 1), ("DIM", 3), ("TEXT", 2)):
+        doc.layers.new(name, dxfattribs={"color": color})
     model = doc.modelspace()
     _geometry(model, width, height, specs, diameter, outline)
     if info:
         style = "DXF_INFO"
-        doc.dimstyles.new(style, dxfattribs={
-            "dimtxt": max(3, min(width, height) * 0.025),
-            "dimasz": max(2, min(width, height) * 0.015),
-            "dimexe": 1.5,
-            "dimexo": 1.0,
-            "dimgap": 1.0,
-        })
+        doc.dimstyles.new(style, dxfattribs={"dimtxt": max(3, min(width, height) * 0.025), "dimasz": max(2, min(width, height) * 0.015), "dimexe": 1.5, "dimexo": 1.0, "dimgap": 1.0})
         offset = max(25, min(width, height) * 0.12)
         _dim_horizontal(model, (0, 0), (width, 0), -offset, f"{width:g}", style)
         _dim_vertical(model, (0, 0), (0, height), -offset, f"{height:g}", style)
         for index, point in enumerate(specs, 1):
-            model.add_text(
-                f"H{index}: X={point['x']:g} Y={point['y']:g} DIA{diameter:g}",
-                dxfattribs={
-                    "layer": "TEXT",
-                    "height": max(3, min(width, height) * 0.018),
-                    "insert": (point["x"] + diameter, point["y"] + diameter),
-                },
-            )
+            model.add_text(f"H{index}: X={point['x']:g} Y={point['y']:g} DIA{diameter:g}", dxfattribs={"layer": "TEXT", "height": max(3, min(width, height) * 0.018), "insert": (point["x"] + diameter, point["y"] + diameter)})
     temporary = path.with_suffix(".tmp.dxf")
     doc.saveas(temporary)
     temporary.replace(path)
@@ -190,57 +180,32 @@ def _validate(path, count):
         model = doc.modelspace()
         cut = sum(1 for entity in model if entity.dxf.layer == "CUT")
         found = sum(1 for entity in model if entity.dxf.layer == "HOLES" and entity.dxftype() == "CIRCLE")
-        audit = doc.audit()
-        errors = [str(error) for error in audit.errors]
+        errors = [str(error) for error in doc.audit().errors]
         units_mm = int(doc.header.get("$INSUNITS", 0)) == 4
-        valid = cut >= 1 and found == count and units_mm and not errors
-        return {
-            "valid": valid,
-            "summary": f"CUT={cut}, HOLES={found}/{count}, mm={units_mm}",
-            "errors": errors,
-            "warnings": [],
-            "metrics": {"cut_entities": cut, "hole_entities": found},
-        }
+        return {"valid": cut == 1 and found == count and units_mm and not errors, "summary": f"CUT={cut}, HOLES={found}/{count}, mm={units_mm}", "errors": errors, "warnings": [], "metrics": {"cut_entities": cut, "hole_entities": found}}
     except Exception as error:
         return {"valid": False, "summary": "DXF validation failed", "errors": [str(error)], "warnings": [], "metrics": {}}
 
 
 def _done_target(source):
     target = DONE / source.name
-    if not target.exists():
-        return target
-    return DONE / f"{source.stem}_{int(time.time())}{source.suffix}"
+    return target if not target.exists() else DONE / f"{source.stem}_{int(time.time())}{source.suffix}"
 
 
 def process(source):
-    roi_payload = _select_roi(source)
-    roi = tuple(map(int, roi_payload["roi"]))
-    outline = extract_outline(source, roi)
+    roi = tuple(map(int, _select_roi(source)["roi"]))
+    detected = extract_outline(source, roi)
     confirmed = _confirm_holes(source, roi)
-    defaults = _defaults(source, confirmed, outline)
-    answer = _manual(defaults)
-    width = float(answer["width"])
-    height = float(answer["height"])
-    count = int(answer["count"])
-    diameter = float(answer["diameter"])
-    specs = list(answer["holes"])
+    answer = _manual(_defaults(source, confirmed, detected))
+    width, height = float(answer["width"]), float(answer["height"])
+    count, diameter, specs = int(answer["count"]), float(answer["diameter"]), list(answer["holes"])
+    outline = _resolved_outline(answer, detected)
     base = OUTBOX / source.stem
     clear = base.with_name(base.name + "_dxf_clear.dxf")
     info = base.with_name(base.name + "_dxf_info.dxf")
     _write(clear, width, height, specs, diameter, outline, False)
     _write(info, width, height, specs, diameter, outline, True)
-    report = {
-        "source": str(source),
-        "roi": roi,
-        "outline_confidence": outline["confidence"],
-        "outline_vertices": len(outline["points"]),
-        "width": width,
-        "height": height,
-        "count": count,
-        "diameter": diameter,
-        "clear": _validate(clear, count),
-        "info": _validate(info, count),
-    }
+    report = {"source": str(source), "roi": roi, "cutout_mode": outline["mode"], "rectified": outline["rectified"], "outline_confidence": detected["confidence"], "detected_outline_vertices": len(detected["points"]), "output_outline_vertices": len(outline["points"]), "width": width, "height": height, "count": count, "diameter": diameter, "clear": _validate(clear, count), "info": _validate(info, count)}
     _atomic_json(base.with_name(base.name + "_report.json"), report)
     DONE.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source), str(_done_target(source)))
@@ -248,10 +213,8 @@ def process(source):
 
 
 def main():
-    INBOX.mkdir(parents=True, exist_ok=True)
-    DONE.mkdir(parents=True, exist_ok=True)
-    OUTBOX.mkdir(parents=True, exist_ok=True)
-    TMP.mkdir(parents=True, exist_ok=True)
+    for folder in (INBOX, DONE, OUTBOX, TMP):
+        folder.mkdir(parents=True, exist_ok=True)
     state = _state()
     print(f"Вход: {INBOX}", flush=True)
     print(f"Выход: {OUTBOX}", flush=True)
