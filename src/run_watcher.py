@@ -1,107 +1,77 @@
 from __future__ import annotations
-import json,os,re,shutil,subprocess,sys,time
+import json, os, re, subprocess, sys, time
 from pathlib import Path
-from types import SimpleNamespace
+import ezdxf
 import hole_diameter_clarification as holes
-ROOT=Path(__file__).resolve().parent.parent;INBOX=ROOT/"новые фотографии";OUTPUT=ROOT/"DXF";DONE=INBOX/"_done"
-EXTENSIONS={".png",".jpg",".jpeg",".tif",".tiff",".bmp",".heic"};NUMBER=re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)(?!\d)")
-def _ocr(source,roi):
-    try:
-        import cv2,pytesseract
-        image=cv2.imread(str(source))
-        if image is None:return []
-        x,y,w,h=map(int,roi);crop=image[y:y+h,x:x+w];values=[]
-        rotations=(crop,cv2.rotate(crop,cv2.ROTATE_90_CLOCKWISE),cv2.rotate(crop,cv2.ROTATE_90_COUNTERCLOCKWISE))
-        for rotated in rotations:
-            gray=cv2.cvtColor(rotated,cv2.COLOR_BGR2GRAY);gray=cv2.resize(gray,None,fx=2.5,fy=2.5,interpolation=cv2.INTER_CUBIC);gray=cv2.threshold(gray,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1]
-            for psm in (6,11,12):
-                text=pytesseract.image_to_string(gray,config=f"--psm {psm} -c tessedit_char_whitelist=0123456789.,",lang="eng")
-                values.extend(float(v.replace(",",".")) for v in NUMBER.findall(text))
-        return values
-    except (ImportError,RuntimeError,ValueError):return []
-def _defaults(numbers,roi):
-    large=sorted({v for v in numbers if 50<=v<=10000},reverse=True)
-    if len(large)>=2:
-        a,b=large[:2];portrait=roi[3]>=roi[2];w,h=((min(a,b),max(a,b)) if portrait else (max(a,b),min(a,b)))
-    else:w,h=395.,830.
-    return w,h
-def _hole_defaults(circles,roi,w,h):
-    x0,y0,rw,rh=roi;result=[]
-    for circle in circles:
-        nx=max(0.,min(1.,(circle.x-x0)/max(rw,1)));ny=max(0.,min(1.,(y0+rh-circle.y)/max(rh,1)));hs="слева" if nx<.5 else "справа";vs="снизу" if ny<.5 else "сверху";result.append((hs,min(nx,1-nx)*w,vs,min(ny,1-ny)*h))
-    return result
-def _run(script,args,response,message):
-    done=subprocess.run([sys.executable,str(Path(__file__).with_name(script)),*map(str,args),str(response)],check=False)
-    if done.returncode==2:return None
-    if done.returncode!=0 or not response.exists():raise RuntimeError(message)
-    return json.loads(response.read_text(encoding="utf-8"))
-def _select_roi(source):
-    OUTPUT.mkdir(parents=True,exist_ok=True);response=OUTPUT/f".roi_{os.getpid()}_{time.time_ns()}.json"
-    try:return _run("roi_dialog.py",[source],response,"Выбор области завершился с ошибкой")
-    finally:response.unlink(missing_ok=True)
-def _confirm(source,roi):
-    response=OUTPUT/f".holes_{os.getpid()}_{time.time_ns()}.json"
-    try:return _run("hole_confirmation_dialog.py",[source,json.dumps(roi)],response,"Подтверждение отверстий завершилось с ошибкой")
-    finally:response.unlink(missing_ok=True)
-def _ask(w,h,defaults,dia):
-    token=f"{os.getpid()}_{time.time_ns()}";request=OUTPUT/f".geometry_{token}_request.json";response=OUTPUT/f".geometry_{token}_response.json";request.write_text(json.dumps({"width":w,"height":h,"defaults":defaults,"diameter":dia},ensure_ascii=False),encoding="utf-8")
-    try:return _run("geometry_dialog.py",[request],response,"Окно размеров завершилось с ошибкой")
-    finally:request.unlink(missing_ok=True);response.unlink(missing_ok=True)
-def _doc():
-    import ezdxf
-    doc=ezdxf.new("R12");doc.header["$INSUNITS"]=4
-    for name,color in (("CUT",7),("HOLES",1),("DIM",3),("TEXT",2)):
-        if name not in doc.layers:doc.layers.add(name,color=color)
-    return doc
-def _geometry(model,w,h,specs,dia):
-    model.add_polyline2d([(0,0),(w,0),(w,h),(0,h)],close=True,dxfattribs={"layer":"CUT"})
-    for spec in specs:model.add_circle((spec["x"],spec["y"]),dia/2,dxfattribs={"layer":"HOLES"})
-def _line(model,a,b):model.add_line(a,b,dxfattribs={"layer":"DIM"})
-def _text(model,text,point,height):model.add_text(text,dxfattribs={"layer":"TEXT","height":height,"insert":point})
-def _dimensions(model,w,h,specs,dia):
-    off=max(25.,min(w,h)*.08);gap=max(8.,off*.3);size=max(3.,min(w,h)*.012);bottom=-off;right=w+off
-    _line(model,(0,bottom),(w,bottom));_line(model,(0,bottom-gap),(0,bottom+gap));_line(model,(w,bottom-gap),(w,bottom+gap));_text(model,f"WIDTH {w:g} mm",(w*.35,bottom-gap-size),size)
-    _line(model,(right,0),(right,h));_line(model,(right-gap,0),(right+gap,0));_line(model,(right-gap,h),(right+gap,h));_text(model,f"HEIGHT {h:g} mm",(right+gap,h*.45),size)
-    px=w+off*2.2;py=h;_text(model,f"PART {w:g} x {h:g} mm",(px,py),size);_text(model,f"HOLES {len(specs)}; DIA {dia:g} mm",(px,py-size*1.8),size)
-    for i,spec in enumerate(specs,1):_text(model,f"H{i}: {spec['h_distance']:g} FROM {spec['h_side'].upper()}; {spec['v_distance']:g} FROM {spec['v_side'].upper()}",(px,py-size*(3.6+i*1.8)),size)
-def _validate(path,count,info,w,h):
-    import ezdxf
-    entities=list(ezdxf.readfile(path).modelspace());cuts=[e for e in entities if e.dxftype()=="POLYLINE" and e.dxf.layer=="CUT"];circles=[e for e in entities if e.dxftype()=="CIRCLE" and e.dxf.layer=="HOLES"];service=[e for e in entities if e.dxf.layer in {"DIM","TEXT"}]
-    if len(cuts)!=1 or len(circles)!=count or (info and not service) or (not info and service):raise RuntimeError("Проверка DXF не пройдена")
-    if info:
-        for entity in service:
-            points=(entity.dxf.start,entity.dxf.end) if entity.dxftype()=="LINE" else ((entity.dxf.insert,) if entity.dxftype()=="TEXT" else ())
-            if any(0<=float(p.x)<=w and 0<=float(p.y)<=h for p in points):raise RuntimeError("Служебная информация касается контура")
-def _write(stem,w,h,specs,dia):
-    OUTPUT.mkdir(parents=True,exist_ok=True);clear=OUTPUT/f"{stem}_dxf_clear.dxf";info=OUTPUT/f"{stem}_dxf_info.dxf";ct=OUTPUT/f".{stem}_clear.tmp.dxf";it=OUTPUT/f".{stem}_info.tmp.dxf"
-    a=_doc();_geometry(a.modelspace(),w,h,specs,dia);a.saveas(ct);b=_doc();_geometry(b.modelspace(),w,h,specs,dia);_dimensions(b.modelspace(),w,h,specs,dia);b.saveas(it);_validate(ct,len(specs),False,w,h);_validate(it,len(specs),True,w,h);ct.replace(clear);it.replace(info)
+from contour_geometry import extract_outline
+from production_validator import ProductionValidator
+INBOX=Path.home()/"Desktop"/"DXF_Inbox"; OUTBOX=Path.home()/"Desktop"/"DXF_Outbox"; SUPPORTED={".jpg",".jpeg",".png",".tif",".tiff",".bmp",".webp"}; POLL=1.0
+
+def _atomic_json(path,payload):
+ tmp=path.with_suffix(path.suffix+".tmp");tmp.write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding="utf-8");tmp.replace(path)
+def _state():
+ path=OUTBOX/".processed_state.json"
+ try:return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+ except Exception:return {}
+def _stable(path):
+ try:a=path.stat();time.sleep(.35);b=path.stat();return (a.st_size,a.st_mtime_ns)==(b.st_size,b.st_mtime_ns)
+ except FileNotFoundError:return False
+def _invoke_helper(name,args,response):
+ response.unlink(missing_ok=True);cmd=[sys.executable,str(Path(__file__).with_name(name)),*map(str,args),str(response)];env=dict(os.environ);env["PYTHONPATH"]=str(Path(__file__).parent)+os.pathsep+env.get("PYTHONPATH","");result=subprocess.run(cmd,env=env)
+ if result.returncode!=0 or not response.exists():raise RuntimeError(f"Диалог {name} отменён или завершился с ошибкой")
+ return json.loads(response.read_text(encoding="utf-8"))
+def _select_roi(source):return _invoke_helper("roi_dialog.py",[source],OUTBOX/".roi_response.json")
+def _confirm_holes(source,roi):return _invoke_helper("hole_confirmation_dialog.py",[source,json.dumps(list(roi))],OUTBOX/".hole_response.json")
+def _manual(source,defaults):return _invoke_helper("geometry_dialog.py",[source,json.dumps(defaults,ensure_ascii=False)],OUTBOX/".geometry_response.json")
+def _parse_dims(source):
+ candidates=[]
+ for path in (source.with_name(source.stem+"_ocr_dimensions.json"),source.with_suffix(".json")):
+  if path.exists():
+   try:
+    data=json.loads(path.read_text(encoding="utf-8"));candidates.extend(float(x) for x in data.get("dimensions",[]) if float(x)>0)
+   except Exception:pass
+ try:
+  text=holes._ocr_text(source);candidates.extend(float(x.replace(",",".")) for x in re.findall(r"(?<![A-Za-z])\d+(?:[.,]\d+)?",text))
+ except Exception:pass
+ vals=sorted({x for x in candidates if 10<=x<=100000},reverse=True);return (vals[0],vals[1]) if len(vals)>=2 else (None,None)
+def _hole_defaults(circles,bbox,w,h):
+ bx,by,bw,bh=map(float,bbox);out=[]
+ for circle in circles:
+  nx=(float(circle["x"])-bx)/max(1.0,bw);ny=1.0-(float(circle["y"])-by)/max(1.0,bh)
+  if -.03<=nx<=1.03 and -.03<=ny<=1.03:out.append({"x":round(min(1,max(0,nx))*w,3),"y":round(min(1,max(0,ny))*h,3)})
+ return out
+def _defaults(source,confirmed,outline):
+ width,height=_parse_dims(source);width=width or 1040.0;height=height or 710.0;diameter=float(confirmed.get("diameter") or holes.read_diameter(source) or 10.0);specs=_hole_defaults(confirmed.get("circles",[]),outline["bbox"],width,height);count=int(confirmed.get("count",len(specs)));specs=specs[:count]
+ while len(specs)<count:
+  i=len(specs);specs.append({"x":round(width*(i+1)/(count+1),3),"y":round(height/2,3)})
+ return {"width":width,"height":height,"count":count,"diameter":diameter,"holes":specs}
+def _geometry(model,width,height,specs,diameter,outline):
+ points=[(float(x)*width,float(y)*height) for x,y in outline.get("points",[])];points=points if len(points)>=4 else [(0,0),(width,0),(width,height),(0,height)];model.add_lwpolyline(points,close=True,dxfattribs={"layer":"CUT"})
+ for p in specs:model.add_circle((p["x"],p["y"]),diameter/2,dxfattribs={"layer":"HOLES"})
+def _dim_horizontal(msp,p1,p2,base,text,style):
+ x1,y1=p1;x2,y2=p2;off=base-y1;msp.add_line((x1,y1),(x1,base),dxfattribs={"layer":"DIM"});msp.add_line((x2,y2),(x2,base),dxfattribs={"layer":"DIM"});msp.add_linear_dim(base=(0,off),p1=p1,p2=p2,angle=0,text=text,dimstyle=style,dxfattribs={"layer":"DIM"}).render()
+def _dim_vertical(msp,p1,p2,base,text,style):
+ x1,y1=p1;x2,y2=p2;off=base-x1;msp.add_line((x1,y1),(base,y1),dxfattribs={"layer":"DIM"});msp.add_line((x2,y2),(base,y2),dxfattribs={"layer":"DIM"});msp.add_linear_dim(base=(off,0),p1=p1,p2=p2,angle=90,text=text,dimstyle=style,dxfattribs={"layer":"DIM"}).render()
+def _write(path,width,height,specs,diameter,outline,info):
+ doc=ezdxf.new("R2010");doc.header["$INSUNITS"]=4;doc.layers.new("CUT",dxfattribs={"color":7});doc.layers.new("HOLES",dxfattribs={"color":1});doc.layers.new("DIM",dxfattribs={"color":3});doc.layers.new("TEXT",dxfattribs={"color":2});msp=doc.modelspace();_geometry(msp,width,height,specs,diameter,outline)
+ if info:
+  style="DXF_INFO";doc.dimstyles.new(style,dxfattribs={"dimtxt":max(3,min(width,height)*.025),"dimasz":max(2,min(width,height)*.015),"dimexe":1.5,"dimexo":1.0,"dimgap":1.0});off=max(25,min(width,height)*.12);_dim_horizontal(msp,(0,0),(width,0),-off,f"{width:g}",style);_dim_vertical(msp,(0,0),(0,height),-off,f"{height:g}",style)
+  for i,p in enumerate(specs,1):msp.add_text(f"H{i}: X={p['x']:g} Y={p['y']:g} DIA{diameter:g}",dxfattribs={"layer":"TEXT","height":max(3,min(width,height)*.018),"insert":(p["x"]+diameter,p["y"]+diameter)})
+ tmp=path.with_suffix(".tmp.dxf");doc.saveas(tmp);tmp.replace(path)
+def _validate(path,count):
+ result=ProductionValidator().validate_dxf(path,expected_counts={"CUT":1,"HOLES":count},require_mm_units=True);return {"valid":result.valid,"summary":result.summary,"errors":result.errors,"warnings":result.warnings,"metrics":result.metrics}
 def process(source):
-    selection=_select_roi(source)
-    if selection is None:raise holes.ClarificationRequired("Область детали не подтверждена")
-    roi=selection["roi"];confirmed=_confirm(source,roi)
-    if confirmed is None:raise holes.ClarificationRequired("Отверстия не подтверждены")
-    circles=[SimpleNamespace(x=item["x"],y=item["y"]) for item in confirmed["circles"]];numbers=_ocr(source,roi);print(f"OCR {source.name}: {numbers}");w,h=_defaults(numbers,roi);geometry=_ask(w,h,_hole_defaults(circles,roi,w,h),confirmed["diameter"])
-    if geometry is None:raise holes.ClarificationRequired("Размеры не подтверждены")
-    _write(source.stem,geometry["width"],geometry["height"],geometry["holes"],confirmed["diameter"]);DONE.mkdir(parents=True,exist_ok=True);target=DONE/source.name
-    if target.exists():target=DONE/f"{source.stem}_{int(time.time())}{source.suffix}"
-    shutil.move(str(source),str(target))
-def _lock():
-    import fcntl
-    handle=(ROOT/".watcher.lock").open("w")
-    try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    except BlockingIOError as error:raise RuntimeError("Обработчик уже запущен") from error
-    handle.write(str(os.getpid()));handle.flush();return handle
+ roi_payload=_select_roi(source);roi=tuple(map(int,roi_payload["roi"]));outline=extract_outline(source,roi);confirmed=_confirm_holes(source,roi);defaults=_defaults(source,confirmed,outline);answer=_manual(source,defaults);width=float(answer["width"]);height=float(answer["height"]);count=int(answer["count"]);diameter=float(answer["diameter"]);specs=list(answer["holes"]);base=OUTBOX/source.stem;clear=base.with_name(base.name+"_dxf_clear.dxf");info=base.with_name(base.name+"_dxf_info.dxf");_write(clear,width,height,specs,diameter,outline,False);_write(info,width,height,specs,diameter,outline,True);report={"source":str(source),"roi":roi,"outline_confidence":outline["confidence"],"outline_vertices":len(outline["points"]),"width":width,"height":height,"count":count,"diameter":diameter,"clear":_validate(clear,count),"info":_validate(info,count)};_atomic_json(base.with_name(base.name+"_report.json"),report);print(f"Готово: {clear.name}, {info.name}",flush=True)
 def main():
-    lock=_lock();INBOX.mkdir(parents=True,exist_ok=True);DONE.mkdir(parents=True,exist_ok=True);OUTPUT.mkdir(parents=True,exist_ok=True);signatures={};paused=set();print(f"Слушаю: {INBOX}")
-    while True:
-        for source in [p for p in INBOX.iterdir() if p.is_file() and p.suffix.lower() in EXTENSIONS]:
-            stat=source.stat();signature=(stat.st_size,stat.st_mtime_ns)
-            if source in paused:
-                if signatures.get(source)==signature:continue
-                paused.remove(source)
-            if signatures.get(source)!=signature:signatures[source]=signature;continue
-            try:process(source);signatures.pop(source,None);print(f"Готово: {source.name}")
-            except holes.ClarificationRequired as error:paused.add(source);print(f"Приостановлено: {error}")
-            except Exception as error:paused.add(source);print(f"Ошибка: {source.name}: {error}")
-        time.sleep(1)
+ INBOX.mkdir(parents=True,exist_ok=True);OUTBOX.mkdir(parents=True,exist_ok=True);state=_state();print(f"Наблюдение: {INBOX}",flush=True)
+ while True:
+  for source in sorted(INBOX.iterdir()):
+   if not source.is_file() or source.suffix.lower() not in SUPPORTED:continue
+   try:stamp=f"{source.stat().st_mtime_ns}:{source.stat().st_size}"
+   except FileNotFoundError:continue
+   key=str(source.resolve())
+   if state.get(key)==stamp or not _stable(source):continue
+   try:process(source);state[key]=stamp;_atomic_json(OUTBOX/".processed_state.json",state)
+   except Exception as exc:print(f"Ошибка {source.name}: {exc}",file=sys.stderr,flush=True)
+  time.sleep(POLL)
 if __name__=="__main__":main()
